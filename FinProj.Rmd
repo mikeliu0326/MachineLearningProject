@@ -1,0 +1,136 @@
+---
+title: "ML Course Project"
+author: "Hao Zhe Liu"
+date: "6/28/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Summary
+
+This assignment seeks to solve a supervised classification problem of predicting the correct 'classe', which measures how well an activity is done from a large set of raw data from groupware. 
+
+The process of solving the problem is by first preprocessing the raw data, selecting features, fitting a model, then predicting on the 20 provided test cases. 
+
+## EDA
+Looking at the data, it appears that there are a few categorical variables (username and new_window) which need to be transformed. Also, a few columns need to be converted to numeric and the three datestamps should be consolidated,
+```{r, results='hide'}
+library(caret)
+library(ggplot2)
+
+raw_train <- read.csv("pml-training.csv")
+raw_test <- read.csv("pml-testing.csv")
+
+head(raw_train); names(raw_train)
+dim(raw_train)
+```
+
+## Preprocessing
+To have the process be reusable, I've written up a function to preprocess the data. In particular, it replaces timestaps with a numeric date offset, replaces all NA's with 0, encode new_window as 0 and 1, create dummys for the multiclass variable user_name, and cast the columns with blanks to be numeric with NA's set to 0. 
+```{r}
+preprocess <- function(raw_df, train=FALSE) {
+  # Deal with NA's
+  df <- raw_df
+  apply(df, MARGIN = 2, function(x) sum(is.na(x)))
+  df[is.na(df)] <- 0
+
+  # Change timestamp to offset in days
+  min_date <- min(df$raw_timestamp_part_1)
+  df$date_offset_days <- (df$raw_timestamp_part_1 - min_date)/60/60/24
+  
+  # Replace new_window with 0 for yes, 1 for no
+  df$new_window <- ifelse(df$new_window=="yes", 0, 1)
+  
+  # Create dummy values, merge with original dataset
+  library(fastDummies)
+  df_dummys <- dummy_cols(subset(df, select=c(user_name)))
+  df_dummys <- subset(df_dummys, select=-c(user_name))
+  df <- cbind(df_dummys, df)
+  
+  # Remove user_name since they've already been dummy-fied, remove classe since its the target variable, remove timestamp data since it was already incorporated
+  df <- subset(df, select=-c(user_name,
+                             raw_timestamp_part_1, raw_timestamp_part_2, 
+                             cvtd_timestamp))
+  if (train) {
+    tgt_vec <- df$classe
+    df <- subset(df, select=-c(classe))
+  } 
+  
+  # Deal with numeric data with blanks
+  nums <- unlist(lapply(df, is.numeric))  
+  for (f in names(df[,!nums])) {
+    df[[f]] <- as.numeric(df[[f]])
+    df[[f]][is.na(df[[f]])] <- 0
+  }
+  
+  if (train) {
+    df <- cbind(df, tgt_vec)
+  }
+  
+  summary(df)
+  df
+}
+
+## Preprocess build and validation sets
+train_DF <- suppressWarnings(preprocess(raw_train, train=TRUE))
+test_DF <- suppressWarnings(preprocess(raw_test))
+
+# Remove all columns with all zeros
+train_DF <- train_DF[,apply(train_DF,2,function(x) !all(x==0))]
+```
+
+## Train-Test Split, Set Up CV Variables
+In this intermediate step, we split the dataset train into a training set and a testing set, with 80% train and 20% test. Also, we set up the control object, for 10-fold cross validation that we will repeat 3 times. 
+```{r}
+## Split dataset into test and train, 80% test, 20% train
+inTrain <- createDataPartition(y=train_DF$tgt_vec, p=0.8, list=FALSE)
+training <- train_DF[inTrain,]
+testing <- train_DF[-inTrain,]
+
+# 10-Fold cv repeated 3 times
+control <- trainControl(method='repeatedcv',
+                        number=10, repeats=3)
+metric <- "Accuracy"
+```
+
+## Model 1: Recursive Partitioning
+Here, we fit the model using a recursive partitioning model. From the summary, we see that the accuracy is not exceptionally high, and from the crosstab we see that the model is fairly accurate for predicting classes A and B, but very poor at predicting the rest.
+```{r, cache = TRUE, results='hide'}
+## R Part: recursive partitioning
+modPart <- train(tgt_vec ~., training, 
+                 method="rpart",
+                 metric=metric,
+                 trControl=control)
+```
+```{r}
+print(modPart)
+table(predict(modPart, training), training$tgt_vec)
+table(predict(modPart, testing), testing$tgt_vec)
+```
+
+## Model 2: Stochastic Gradient Boosting
+Here, we use GBM to fit a stochastic gradient boosting model. We can see from the crosstab that it fits the model very well, with very high accuracy and nearly perfectly predicting the test set. Therefore, we will use this for our out-of-sample prediction.
+```{r, cache = TRUE, results='hide'}
+## GBM
+modGBM <- train(tgt_vec ~., training, 
+                method="gbm",
+                metric=metric,
+                trControl=control)
+```
+```{r}
+print(modGBM)
+table(predict(modGBM, training), training$tgt_vec)
+table(predict(modGBM, testing), testing$tgt_vec)
+```
+
+## Prediction
+Having fit the model, we now conduct our out-of-sample predictions on the test_DF data. 
+```{r}
+# Predicting
+pred <- predict(modGBM, test_DF)
+table(pred)
+pred
+```
